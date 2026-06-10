@@ -327,6 +327,14 @@ function validateForm(form) {
   return errors;
 }
 
+function percentageOfTotal(total, totalSuccessful) {
+  if (typeof total !== "number" || typeof totalSuccessful !== "number" || totalSuccessful <= 0) {
+    return null;
+  }
+
+  return (total / totalSuccessful) * 100;
+}
+
 app.get("/", (req, res) => {
   res.render("index", {
     form: initialForm(),
@@ -351,6 +359,7 @@ app.post("/", async (req, res) => {
   const errors = validateForm(form);
   const results = [];
   let apiError = null;
+  let totalSuccessful;
 
   if (errors.length === 0) {
     for (const bucket of buckets) {
@@ -370,6 +379,10 @@ app.post("/", async (req, res) => {
           totalBucket: bucket.total
         });
 
+        if (bucket.total) {
+          totalSuccessful = total;
+        }
+
         if (bucket !== buckets[buckets.length - 1] && requestDelayMs > 0) {
           await delay(requestDelayMs);
         }
@@ -386,16 +399,24 @@ app.post("/", async (req, res) => {
       }
     }
 
-    const totalSuccessful = results.find((result) => result.totalBucket)?.total;
+    totalSuccessful = results.find((result) => result.totalBucket)?.total;
+    results.forEach((result) => {
+      if (!result.error) {
+        result.percentageOfTotal = percentageOfTotal(result.total, totalSuccessful);
+      }
+    });
+
     const positivelyIdentifiedTotal = results
       .filter((result) => result.positive)
       .reduce((sum, result) => sum + result.total, 0);
 
     if (typeof totalSuccessful === "number") {
+      const otherTotal = Math.max(0, totalSuccessful - positivelyIdentifiedTotal);
       results.push({
         name: "Other automated / suspicious / unknown",
         query: "Not queried. Calculated locally as total successful requests minus identified buckets.",
-        total: Math.max(0, totalSuccessful - positivelyIdentifiedTotal),
+        total: otherTotal,
+        percentageOfTotal: percentageOfTotal(otherTotal, totalSuccessful),
         calculated: true
       });
     } else {
@@ -446,6 +467,7 @@ app.post("/run", async (req, res) => {
   }
 
   const results = [];
+  let totalSuccessful;
 
   for (const bucket of buckets) {
     const query = buildQuery(bucket.template, form);
@@ -466,8 +488,14 @@ app.post("/run", async (req, res) => {
         query,
         total,
         positive: bucket.positive,
-        totalBucket: bucket.total
+        totalBucket: bucket.total,
+        percentageOfTotal: percentageOfTotal(total, totalSuccessful)
       };
+
+      if (bucket.total) {
+        totalSuccessful = total;
+        result.percentageOfTotal = percentageOfTotal(total, totalSuccessful);
+      }
 
       results.push(result);
       writeJsonLine(res, {
@@ -493,18 +521,20 @@ app.post("/run", async (req, res) => {
     }
   }
 
-  const totalSuccessful = results.find((result) => result.totalBucket)?.total;
+  totalSuccessful = results.find((result) => result.totalBucket)?.total;
   const positivelyIdentifiedTotal = results
     .filter((result) => result.positive)
     .reduce((sum, result) => sum + result.total, 0);
 
   if (typeof totalSuccessful === "number") {
+    const otherTotal = Math.max(0, totalSuccessful - positivelyIdentifiedTotal);
     writeJsonLine(res, {
       type: "result",
       result: {
         name: "Other automated / suspicious / unknown",
         query: "Not queried. Calculated locally as total successful requests minus identified buckets.",
-        total: Math.max(0, totalSuccessful - positivelyIdentifiedTotal),
+        total: otherTotal,
+        percentageOfTotal: percentageOfTotal(otherTotal, totalSuccessful),
         calculated: true
       }
     });

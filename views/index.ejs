@@ -143,6 +143,7 @@
                   <th class="px-4 py-3">Bucket name</th>
                   <th class="px-4 py-3">Query / calculation</th>
                   <th class="px-4 py-3 text-right">Total count</th>
+                  <th class="px-4 py-3 text-right">% of total successful</th>
                 </tr>
               </thead>
               <tbody id="results-body" class="divide-y divide-slate-200">
@@ -163,6 +164,13 @@
                         <span class="text-red-700">Error</span>
                       <% } else { %>
                         <%= result.total.toLocaleString() %>
+                      <% } %>
+                    </td>
+                    <td class="px-4 py-3 text-right align-top font-mono">
+                      <% if (result.error || result.percentageOfTotal === null || result.percentageOfTotal === undefined) { %>
+                        <span class="text-slate-400">-</span>
+                      <% } else { %>
+                        <%= result.percentageOfTotal.toFixed(2) %>%
                       <% } %>
                     </td>
                   </tr>
@@ -199,6 +207,14 @@
           return Number(value || 0).toLocaleString();
         }
 
+        function formatPercent(value) {
+          if (value === null || value === undefined || Number.isNaN(Number(value))) {
+            return '<span class="text-slate-400">-</span>';
+          }
+
+          return `${Number(value).toFixed(2)}%`;
+        }
+
         function rowClass(result) {
           return result.calculated ? "bg-slate-50" : "";
         }
@@ -217,6 +233,9 @@
             : isError
               ? '<span class="text-red-700">Error</span>'
               : formatCount(result.total);
+          const percentHtml = state === "running" || isError
+            ? '<span class="text-slate-400">-</span>'
+            : formatPercent(result.percentageOfTotal);
 
           return `
             <td class="w-64 px-4 py-3 align-top font-medium text-slate-900">${escapeHtml(result.name)}</td>
@@ -225,6 +244,7 @@
               ${errorHtml}
             </td>
             <td class="px-4 py-3 text-right align-top font-mono">${totalHtml}</td>
+            <td class="px-4 py-3 text-right align-top font-mono">${percentHtml}</td>
           `;
         }
 
@@ -286,11 +306,13 @@
               const message = JSON.parse(line);
 
               if (message.type === "validation-error") {
+                document.getElementById("initial-loading-row")?.remove();
                 showValidationErrors(message.errors);
                 runStatus.textContent = "Validation failed";
               }
 
               if (message.type === "started") {
+                document.getElementById("initial-loading-row")?.remove();
                 runStatus.textContent = `Running ${message.name}`;
                 appendStartedRow(message);
               }
@@ -309,12 +331,20 @@
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
 
+          const originalButtonText = runButton.textContent;
           validationErrors.classList.add("hidden");
           validationErrorsList.innerHTML = "";
           resultsSection.classList.remove("hidden");
-          resultsBody.innerHTML = "";
+          resultsBody.innerHTML = `
+            <tr id="initial-loading-row">
+              <td colspan="4" class="px-4 py-6 text-center text-sm text-slate-500">
+                Starting request run...
+              </td>
+            </tr>
+          `;
           pendingRows.clear();
-          runStatus.textContent = "Starting";
+          runStatus.textContent = "Starting request run";
+          runButton.textContent = "Running...";
           runButton.disabled = true;
           runButton.classList.add("cursor-not-allowed", "opacity-70");
 
@@ -340,6 +370,7 @@
             }, "done"));
           } finally {
             runButton.disabled = false;
+            runButton.textContent = originalButtonText;
             runButton.classList.remove("cursor-not-allowed", "opacity-70");
           }
         });
