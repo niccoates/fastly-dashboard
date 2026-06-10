@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fastly NGWAF Request Counts</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-slate-50 text-slate-900">
+    <main class="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
+      <header class="mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 class="text-2xl font-semibold tracking-tight">Fastly NGWAF request counts</h1>
+          <p class="mt-1 text-sm text-slate-600">Sequential request count query tester</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+          <span>
+            Workspace:
+            <span class="font-mono"><%= workspaceId || "not configured" %></span>
+          </span>
+          <span class="text-slate-300">|</span>
+          <span>
+            Delay:
+            <span class="font-mono"><%= requestDelayMs %>ms</span>
+          </span>
+          <% if (passwordEnabled) { %>
+            <span class="text-slate-300">|</span>
+            <form method="post" action="/logout">
+              <button type="submit" class="text-slate-500 underline decoration-slate-300 underline-offset-2 hover:text-slate-900">
+                Log out
+              </button>
+            </form>
+          <% } %>
+        </div>
+      </header>
+
+      <% if (errors.length > 0) { %>
+        <div class="mb-5 rounded border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <p class="font-medium">Please fix the following:</p>
+          <ul class="mt-2 list-disc pl-5">
+            <% errors.forEach((error) => { %>
+              <li><%= error %></li>
+            <% }) %>
+          </ul>
+        </div>
+      <% } %>
+
+      <% if (apiError) { %>
+        <div class="mb-5 rounded border border-red-300 bg-red-50 p-4 text-sm text-red-900">
+          <p class="font-semibold">Fastly API error</p>
+          <dl class="mt-3 space-y-3">
+            <div>
+              <dt class="font-medium">Status code</dt>
+              <dd class="font-mono"><%= apiError.status %></dd>
+            </div>
+            <div>
+              <dt class="font-medium">Failed query</dt>
+              <dd class="mt-1 overflow-x-auto rounded bg-white p-2 font-mono text-xs"><%= apiError.query %></dd>
+            </div>
+            <div>
+              <dt class="font-medium">Response body</dt>
+              <dd class="mt-1 whitespace-pre-wrap rounded bg-white p-2 font-mono text-xs"><%= apiError.body %></dd>
+            </div>
+          </dl>
+        </div>
+      <% } %>
+
+      <section class="mb-8 rounded border border-slate-200 bg-white p-5 shadow-sm">
+        <form id="query-form" method="post" class="grid gap-5">
+          <div>
+            <label for="server" class="block text-sm font-medium text-slate-700">Server hostname</label>
+            <input
+              id="server"
+              name="server"
+              type="text"
+              value="<%= form.server %>"
+              placeholder="status.broadcom.com"
+              class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-100">
+          </div>
+
+          <div>
+            <label for="paths" class="block text-sm font-medium text-slate-700">Paths</label>
+            <textarea
+              id="paths"
+              name="paths"
+              rows="5"
+              placeholder="/services/vmware-cloud-services&#10;/services/vmware-cloud-services/"
+              class="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-sm shadow-sm focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-100"><%= form.paths %></textarea>
+            <p class="mt-1 text-xs text-slate-500">Enter one path per line. Leave blank to omit path filters.</p>
+          </div>
+
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label for="from" class="block text-sm font-medium text-slate-700">From date</label>
+              <input
+                id="from"
+                name="from"
+                type="date"
+                value="<%= form.from %>"
+                class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-100">
+            </div>
+            <div>
+              <label for="until" class="block text-sm font-medium text-slate-700">Until date</label>
+              <input
+                id="until"
+                name="until"
+                type="date"
+                value="<%= form.until %>"
+                class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-100">
+            </div>
+          </div>
+
+          <div>
+            <button
+              id="run-button"
+              type="submit"
+              class="inline-flex items-center rounded bg-red-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-200">
+              Run queries
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section id="validation-errors" class="mb-5 hidden rounded border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+        <p class="font-medium">Please fix the following:</p>
+        <ul id="validation-errors-list" class="mt-2 list-disc pl-5"></ul>
+      </section>
+
+      <section id="results-section" class="<%= submitted && results.length > 0 ? "" : "hidden" %>">
+        <div class="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+          <h2 class="text-lg font-semibold">Results</h2>
+          <div class="text-xs text-slate-500">
+            <span id="run-status"><%= submitted && results.length > 0 ? "Complete" : "Ready" %></span>
+            <span class="mx-2 text-slate-300">|</span>
+            Counts read from <span class="font-mono">response.meta.total</span>
+          </div>
+        </div>
+        <div class="overflow-hidden rounded border border-slate-200 bg-white shadow-sm">
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200 text-sm">
+              <thead class="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                <tr>
+                  <th class="px-4 py-3">Bucket name</th>
+                  <th class="px-4 py-3">Query / calculation</th>
+                  <th class="px-4 py-3 text-right">Total count</th>
+                </tr>
+              </thead>
+              <tbody id="results-body" class="divide-y divide-slate-200">
+                <% results.forEach((result) => { %>
+                  <tr class="<%= result.calculated ? "bg-slate-50" : "" %>">
+                    <td class="w-64 px-4 py-3 align-top font-medium text-slate-900"><%= result.name %></td>
+                    <td class="px-4 py-3 align-top">
+                      <code class="block max-w-3xl whitespace-normal break-words rounded bg-slate-100 px-2 py-1 text-xs text-slate-700"><%= result.query %></code>
+                      <% if (result.error) { %>
+                        <div class="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-900">
+                          <div><span class="font-semibold">Status:</span> <span class="font-mono"><%= result.error.status %></span></div>
+                          <pre class="mt-1 whitespace-pre-wrap font-mono"><%= result.error.body %></pre>
+                        </div>
+                      <% } %>
+                    </td>
+                    <td class="px-4 py-3 text-right align-top font-mono">
+                      <% if (result.error) { %>
+                        <span class="text-red-700">Error</span>
+                      <% } else { %>
+                        <%= result.total.toLocaleString() %>
+                      <% } %>
+                    </td>
+                  </tr>
+                <% }) %>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p class="mt-3 text-xs text-slate-500">
+          Categories are based on request characteristics and Fastly signals, and should be treated as traffic profiling rather than confirmed user attribution.
+        </p>
+      </section>
+
+      <script>
+        const form = document.getElementById("query-form");
+        const runButton = document.getElementById("run-button");
+        const resultsSection = document.getElementById("results-section");
+        const resultsBody = document.getElementById("results-body");
+        const runStatus = document.getElementById("run-status");
+        const validationErrors = document.getElementById("validation-errors");
+        const validationErrorsList = document.getElementById("validation-errors-list");
+        const pendingRows = new Map();
+
+        function escapeHtml(value) {
+          return String(value)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+        }
+
+        function formatCount(value) {
+          return Number(value || 0).toLocaleString();
+        }
+
+        function rowClass(result) {
+          return result.calculated ? "bg-slate-50" : "";
+        }
+
+        function rowCellsHtml(result, state) {
+          const isError = Boolean(result.error);
+          const queryHtml = escapeHtml(result.query);
+          const errorHtml = isError
+            ? `<div class="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-900">
+                <div><span class="font-semibold">Status:</span> <span class="font-mono">${escapeHtml(result.error.status)}</span></div>
+                <pre class="mt-1 whitespace-pre-wrap font-mono">${escapeHtml(result.error.body)}</pre>
+              </div>`
+            : "";
+          const totalHtml = state === "running"
+            ? '<span class="text-slate-500">Running...</span>'
+            : isError
+              ? '<span class="text-red-700">Error</span>'
+              : formatCount(result.total);
+
+          return `
+            <td class="w-64 px-4 py-3 align-top font-medium text-slate-900">${escapeHtml(result.name)}</td>
+            <td class="px-4 py-3 align-top">
+              <code class="block max-w-3xl whitespace-normal break-words rounded bg-slate-100 px-2 py-1 text-xs text-slate-700">${queryHtml}</code>
+              ${errorHtml}
+            </td>
+            <td class="px-4 py-3 text-right align-top font-mono">${totalHtml}</td>
+          `;
+        }
+
+        function rowHtml(result, state) {
+          return `<tr class="${rowClass(result)}">${rowCellsHtml(result, state)}</tr>`;
+        }
+
+        function appendStartedRow(message) {
+          const row = document.createElement("tr");
+          const result = {
+            name: message.name,
+            query: message.query
+          };
+
+          row.className = rowClass(result);
+          row.innerHTML = rowCellsHtml(result, "running");
+          resultsBody.appendChild(row);
+          pendingRows.set(message.name, row);
+        }
+
+        function finishRow(result) {
+          const row = pendingRows.get(result.name);
+
+          if (row) {
+            row.className = rowClass(result);
+            row.innerHTML = rowCellsHtml(result, "done");
+            pendingRows.delete(result.name);
+          } else {
+            resultsBody.insertAdjacentHTML("beforeend", rowHtml(result, "done"));
+          }
+        }
+
+        function showValidationErrors(errors) {
+          validationErrorsList.innerHTML = "";
+          errors.forEach((error) => {
+            const item = document.createElement("li");
+            item.textContent = error;
+            validationErrorsList.appendChild(item);
+          });
+          validationErrors.classList.remove("hidden");
+        }
+
+        async function readResultStream(response) {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+
+            for (const line of lines) {
+              if (!line.trim()) continue;
+
+              const message = JSON.parse(line);
+
+              if (message.type === "validation-error") {
+                showValidationErrors(message.errors);
+                runStatus.textContent = "Validation failed";
+              }
+
+              if (message.type === "started") {
+                runStatus.textContent = `Running ${message.name}`;
+                appendStartedRow(message);
+              }
+
+              if (message.type === "result" || message.type === "api-error") {
+                finishRow(message.result);
+              }
+
+              if (message.type === "done") {
+                runStatus.textContent = "Complete";
+              }
+            }
+          }
+        }
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+
+          validationErrors.classList.add("hidden");
+          validationErrorsList.innerHTML = "";
+          resultsSection.classList.remove("hidden");
+          resultsBody.innerHTML = "";
+          pendingRows.clear();
+          runStatus.textContent = "Starting";
+          runButton.disabled = true;
+          runButton.classList.add("cursor-not-allowed", "opacity-70");
+
+          try {
+            const response = await fetch("/run", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify(Object.fromEntries(new FormData(form)))
+            });
+
+            await readResultStream(response);
+          } catch (error) {
+            runStatus.textContent = "Request failed";
+            resultsBody.insertAdjacentHTML("beforeend", rowHtml({
+              name: "Dashboard request",
+              query: "POST /run",
+              error: {
+                status: "Client error",
+                body: error.message
+              }
+            }, "done"));
+          } finally {
+            runButton.disabled = false;
+            runButton.classList.remove("cursor-not-allowed", "opacity-70");
+          }
+        });
+      </script>
+    </main>
+  </body>
+</html>
