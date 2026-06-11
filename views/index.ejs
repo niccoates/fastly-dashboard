@@ -89,25 +89,10 @@
             <p class="mt-1 text-xs text-slate-500">Enter one path per line. Leave blank to omit path filters.</p>
           </div>
 
-          <div class="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label for="from" class="block text-sm font-medium text-slate-700">From date</label>
-              <input
-                id="from"
-                name="from"
-                type="date"
-                value="<%= form.from %>"
-                class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-100">
-            </div>
-            <div>
-              <label for="until" class="block text-sm font-medium text-slate-700">Until date</label>
-              <input
-                id="until"
-                name="until"
-                type="date"
-                value="<%= form.until %>"
-                class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-100">
-            </div>
+          <div class="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            Date range:
+            <span class="font-mono"><%= form.from %> through <%= form.displayUntil %></span>
+            <span class="text-xs text-slate-500">(last 30 complete UTC days; Fastly until boundary is <span class="font-mono"><%= form.until %></span>)</span>
           </div>
 
           <div>
@@ -152,6 +137,12 @@
                     <td class="w-64 px-4 py-3 align-top font-medium text-slate-900"><%= result.name %></td>
                     <td class="px-4 py-3 align-top">
                       <code class="block max-w-3xl whitespace-normal break-words rounded bg-slate-100 px-2 py-1 text-xs text-slate-700"><%= result.query %></code>
+                      <% if (result.chunks && result.chunks.length > 0) { %>
+                        <p class="mt-2 text-xs text-slate-500">
+                          Date chunks queried:
+                          <span class="font-mono"><%= result.chunks.map((chunk) => chunk.label).join(", ") %></span>
+                        </p>
+                      <% } %>
                       <% if (result.error) { %>
                         <div class="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-900">
                           <div><span class="font-semibold">Status:</span> <span class="font-mono"><%= result.error.status %></span></div>
@@ -222,6 +213,12 @@
         function rowCellsHtml(result, state) {
           const isError = Boolean(result.error);
           const queryHtml = escapeHtml(result.query);
+          const chunkHtml = Array.isArray(result.chunks) && result.chunks.length > 0
+            ? `<p class="mt-2 text-xs text-slate-500">
+                Date chunks queried:
+                <span class="font-mono">${escapeHtml(result.chunks.map((chunk) => chunk.label).join(", "))}</span>
+              </p>`
+            : "";
           const errorHtml = isError
             ? `<div class="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-900">
                 <div><span class="font-semibold">Status:</span> <span class="font-mono">${escapeHtml(result.error.status)}</span></div>
@@ -241,6 +238,7 @@
             <td class="w-64 px-4 py-3 align-top font-medium text-slate-900">${escapeHtml(result.name)}</td>
             <td class="px-4 py-3 align-top">
               <code class="block max-w-3xl whitespace-normal break-words rounded bg-slate-100 px-2 py-1 text-xs text-slate-700">${queryHtml}</code>
+              ${chunkHtml}
               ${errorHtml}
             </td>
             <td class="px-4 py-3 text-right align-top font-mono">${totalHtml}</td>
@@ -256,7 +254,8 @@
           const row = document.createElement("tr");
           const result = {
             name: message.name,
-            query: message.query
+            query: message.query,
+            chunks: message.chunks
           };
 
           row.className = rowClass(result);

@@ -18,6 +18,8 @@ const authCookieName = "fastly_dashboard_auth";
 const authToken = INTERNAL_PASSWORD
   ? crypto.createHash("sha256").update(`fastly-dashboard:${INTERNAL_PASSWORD}`).digest("hex")
   : "";
+const maxSelectedRangeDays = 30;
+const maxFastlyChunkDays = 7;
 
 const buckets = [
   {
@@ -227,6 +229,81 @@ function normalizeDateForFastly(dateValue) {
   return String(dateValue || "").replaceAll("-", "");
 }
 
+function parseDateInput(dateValue) {
+  const value = String(dateValue || "");
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return date;
+}
+
+function formatDateInput(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function addUtcDays(date, days) {
+  const nextDate = new Date(date);
+  nextDate.setUTCDate(nextDate.getUTCDate() + days);
+  return nextDate;
+}
+
+function utcStartOfDay(date = new Date()) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function lastThirtyDayRange(today = new Date()) {
+  const untilDate = utcStartOfDay(today);
+  const fromDate = addUtcDays(untilDate, -maxSelectedRangeDays);
+  const displayUntilDate = addUtcDays(untilDate, -1);
+
+  return {
+    from: formatDateInput(fromDate),
+    until: formatDateInput(untilDate),
+    displayUntil: formatDateInput(displayUntilDate)
+  };
+}
+
+function buildDateChunks(fromValue, untilValue) {
+  const fromDate = parseDateInput(fromValue);
+  const untilDate = parseDateInput(untilValue);
+
+  if (!fromDate || !untilDate || fromDate >= untilDate) {
+    return [];
+  }
+
+  const chunks = [];
+  let chunkFrom = fromDate;
+
+  while (chunkFrom < untilDate) {
+    const chunkUntil = new Date(
+      Math.min(addUtcDays(chunkFrom, maxFastlyChunkDays).getTime(), untilDate.getTime())
+    );
+
+    chunks.push({
+      from: formatDateInput(chunkFrom),
+      until: formatDateInput(chunkUntil),
+      label: `${formatDateInput(chunkFrom)} to ${formatDateInput(chunkUntil)} (until exclusive)`
+    });
+
+    chunkFrom = chunkUntil;
+  }
+
+  return chunks;
+}
+
 function buildPathFilter(pathsInput) {
   return String(pathsInput || "")
     .split(/\r?\n/)
@@ -251,6 +328,37 @@ function buildQuery(template, form) {
     .replaceAll("{until}", replacements.until)
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function buildChunkQuery(template, form, chunk) {
+  return buildQuery(template, {
+    ...form,
+    from: chunk.from,
+    until: chunk.until
+  });
+}
+
+async function getBucketCountAcrossChunks({ workspaceId, token, bucket, form, chunks }) {
+  let total = 0;
+  const queries = [];
+
+  for (const chunk of chunks) {
+    const query = buildChunkQuery(bucket.template, form, chunk);
+    const count = await getFastlyCountWithRetry({
+      workspaceId,
+      token,
+      query
+    });
+
+    total += count;
+    queries.push(query);
+
+    if (chunk !== chunks[chunks.length - 1] && requestDelayMs > 0) {
+      await delay(requestDelayMs);
+    }
+  }
+
+  return { total, queries };
 }
 
 async function getFastlyCount({ workspaceId, token, query }) {
@@ -304,11 +412,14 @@ async function getFastlyCountWithRetry({ workspaceId, token, query }) {
 }
 
 function initialForm() {
+  const range = lastThirtyDayRange();
+
   return {
     server: "status.broadcom.com",
     paths: "",
-    from: "",
-    until: ""
+    from: range.from,
+    until: range.until,
+    displayUntil: range.displayUntil
   };
 }
 
@@ -318,13 +429,20 @@ function validateForm(form) {
   if (!FASTLY_API_KEY) errors.push("FASTLY_API_KEY is not set.");
   if (!FASTLY_WORKSPACE_ID) errors.push("FASTLY_WORKSPACE_ID is not set.");
   if (!form.server.trim()) errors.push("Server hostname is required.");
-  if (!form.from) errors.push("From date is required.");
-  if (!form.until) errors.push("Until date is required.");
-  if (form.from && form.until && form.from > form.until) {
-    errors.push("From date must be before or equal to until date.");
-  }
 
   return errors;
+}
+
+function buildRunForm(body) {
+  const range = lastThirtyDayRange();
+
+  return {
+    server: body.server || "",
+    paths: body.paths || "",
+    from: range.from,
+    until: range.until,
+    displayUntil: range.displayUntil
+  };
 }
 
 function percentageOfTotal(total, totalSuccessful) {
@@ -349,14 +467,9 @@ app.get("/", (req, res) => {
 });
 
 app.post("/", async (req, res) => {
-  const form = {
-    server: req.body.server || "",
-    paths: req.body.paths || "",
-    from: req.body.from || "",
-    until: req.body.until || ""
-  };
-
+  const form = buildRunForm(req.body);
   const errors = validateForm(form);
+  const chunks = buildDateChunks(form.from, form.until);
   const results = [];
   let apiError = null;
   let totalSuccessful;
@@ -365,15 +478,19 @@ app.post("/", async (req, res) => {
     for (const bucket of buckets) {
       try {
         const query = buildQuery(bucket.template, form);
-        const total = await getFastlyCountWithRetry({
+        const { total, queries } = await getBucketCountAcrossChunks({
           workspaceId: FASTLY_WORKSPACE_ID,
           token: FASTLY_API_KEY,
-          query
+          bucket,
+          form,
+          chunks
         });
 
         results.push({
           name: bucket.name,
           query,
+          queries,
+          chunks,
           total,
           positive: bucket.positive,
           totalBucket: bucket.total
@@ -391,6 +508,7 @@ app.post("/", async (req, res) => {
         results.push({
           name: bucket.name,
           query,
+          chunks,
           error: {
             status: error.status || "Unknown",
             body: error.body || error.message
@@ -407,7 +525,7 @@ app.post("/", async (req, res) => {
     });
 
     const positivelyIdentifiedTotal = results
-      .filter((result) => result.positive)
+      .filter((result) => result.positive && typeof result.total === "number")
       .reduce((sum, result) => sum + result.total, 0);
 
     if (typeof totalSuccessful === "number") {
@@ -448,13 +566,9 @@ function writeJsonLine(res, payload) {
 }
 
 app.post("/run", async (req, res) => {
-  const form = {
-    server: req.body.server || "",
-    paths: req.body.paths || "",
-    from: req.body.from || "",
-    until: req.body.until || ""
-  };
+  const form = buildRunForm(req.body);
   const errors = validateForm(form);
+  const chunks = buildDateChunks(form.from, form.until);
 
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
@@ -474,18 +588,23 @@ app.post("/run", async (req, res) => {
     writeJsonLine(res, {
       type: "started",
       name: bucket.name,
-      query
+      query,
+      chunks
     });
 
     try {
-      const total = await getFastlyCountWithRetry({
+      const { total, queries } = await getBucketCountAcrossChunks({
         workspaceId: FASTLY_WORKSPACE_ID,
         token: FASTLY_API_KEY,
-        query
+        bucket,
+        form,
+        chunks
       });
       const result = {
         name: bucket.name,
         query,
+        queries,
+        chunks,
         total,
         positive: bucket.positive,
         totalBucket: bucket.total,
@@ -508,6 +627,7 @@ app.post("/run", async (req, res) => {
         result: {
           name: bucket.name,
           query,
+          chunks,
           error: {
             status: error.status || "Unknown",
             body: error.body || error.message
@@ -523,7 +643,7 @@ app.post("/run", async (req, res) => {
 
   totalSuccessful = results.find((result) => result.totalBucket)?.total;
   const positivelyIdentifiedTotal = results
-    .filter((result) => result.positive)
+    .filter((result) => result.positive && typeof result.total === "number")
     .reduce((sum, result) => sum + result.total, 0);
 
   if (typeof totalSuccessful === "number") {
@@ -556,14 +676,18 @@ app.post("/run", async (req, res) => {
   res.end();
 });
 
-app.listen(port, host, () => {
-  console.log(`Fastly NGWAF request dashboard running at http://${host}:${port}`);
-});
+if (require.main === module) {
+  app.listen(port, host, () => {
+    console.log(`Fastly NGWAF request dashboard running at http://${host}:${port}`);
+  });
+}
 
 module.exports = {
   app,
+  buildDateChunks,
   buildPathFilter,
   buildQuery,
+  lastThirtyDayRange,
   getFastlyCount,
   normalizeDateForFastly
 };
