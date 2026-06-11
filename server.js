@@ -704,6 +704,19 @@ function formatPercentageValue(value) {
 function addCollectionPercentages(pathResults) {
   const totalSuccessful = pathResults?.total?.total;
 
+  if (typeof totalSuccessful === "number") {
+    const positivelyIdentifiedTotal = buckets
+      .filter((bucket) => bucket.positive)
+      .reduce((sum, bucket) => {
+        const bucketTotal = pathResults?.[bucket.collectionKey]?.total;
+        return typeof bucketTotal === "number" ? sum + bucketTotal : sum;
+      }, 0);
+
+    pathResults.other = {
+      total: Math.max(0, totalSuccessful - positivelyIdentifiedTotal)
+    };
+  }
+
   Object.values(pathResults || {}).forEach((bucketResult) => {
     if (bucketResult && typeof bucketResult.total === "number") {
       bucketResult.percentage = formatPercentageValue(percentageOfTotal(bucketResult.total, totalSuccessful));
