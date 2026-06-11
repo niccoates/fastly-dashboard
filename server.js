@@ -20,51 +20,60 @@ const authToken = INTERNAL_PASSWORD
   : "";
 const maxSelectedRangeDays = 30;
 const maxFastlyChunkDays = 7;
+const collectionResults = new Map();
 
 const buckets = [
   {
     name: "Total successful requests",
+    collectionKey: "total",
     template: "server:{server} {paths} from:{from} until:{until} httpcode:200",
     total: true
   },
   {
     name: "Human visitors - strict candidates",
+    collectionKey: "human",
     template:
       'server:{server} {paths} from:{from} until:{until} httpcode:200 requestheader:Sec-Fetch-User:"?1" -tag:SUSPECTED-BOT -tag:SUSPECTED-BAD-BOT -tag:DATACENTER sort:time-desc',
     positive: true
   },
   {
     name: "LLM / AI crawler and fetcher samples",
+    collectionKey: "llms",
     template:
       "server:{server} {paths} from:{from} until:{until} httpcode:200 tag:VERIFIED-BOT.AI-FETCHER tag:VERIFIED-BOT.AI-CRAWLER tag:SUSPECTED-BOT.AI-FETCHER tag:SUSPECTED-BOT.AI-CRAWLER sort:time-desc",
     positive: true
   },
   {
     name: "Status aggregators",
+    collectionKey: "statusAggregators",
     template:
       "server:{server} {paths} from:{from} until:{until} httpcode:200 useragent:~StatusGator useragent:~PulseBoard useragent:~ReliabilityAPI useragent:~VendorMonitor useragent:~StatusMonitor sort:time-desc",
     positive: true
   },
   {
     name: "Synthetic monitoring samples",
+    collectionKey: "syntheticMonitoring",
     template:
       "server:{server} {paths} from:{from} until:{until} httpcode:200 useragent:~Catchpoint useragent:~uptime-monitor useragent:~UptimeRobot useragent:~Pingdom useragent:~StatusCake useragent:~Datadog useragent:~Site24x7 useragent:~Checkly useragent:~Uptrends useragent:~BetterStack sort:time-desc",
     positive: true
   },
   {
     name: "Known search crawlers",
+    collectionKey: "searchCrawlers",
     template:
       "server:{server} {paths} from:{from} until:{until} httpcode:200 tag:VERIFIED-BOT.SEARCH-ENGINE-CRAWLER sort:time-desc",
     positive: true
   },
   {
     name: "Enterprise automation / customer polling samples",
+    collectionKey: "enterpriseAutomation",
     template:
       'server:{server} {paths} from:{from} until:{until} httpcode:200 useragent:"Splunk (Default)" useragent:~PowerShell useragent:~curl useragent:~python useragent:~Go-http-client useragent:~Java useragent:~Wget sort:time-desc',
     positive: true
   },
   {
     name: "Bad bot / scanner / impersonator",
+    collectionKey: "badBots",
     template:
       "server:{server} {paths} from:{from} until:{until} httpcode:200 tag:SUSPECTED-BAD-BOT tag:SUSPECTED-BAD-BOT.HEADLESS tag:SUSPECTED-BOT.HEADLESS tag:SCANNER tag:TORNODE sort:time-desc",
     positive: true
@@ -142,6 +151,20 @@ function parseAllowedIps(value) {
 
 function normalizeIp(ip) {
   return String(ip || "").replace(/^::ffff:/, "").trim();
+}
+
+function normalizeServerInput(server) {
+  const value = String(server || "").trim();
+
+  if (!value) {
+    return "";
+  }
+
+  try {
+    return new URL(value.includes("://") ? value : `https://${value}`).hostname;
+  } catch (_error) {
+    return value;
+  }
 }
 
 function getClientIp(req) {
@@ -313,6 +336,93 @@ function buildPathFilter(pathsInput) {
     .join(" ");
 }
 
+function decodeXmlText(value) {
+  return String(value || "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'");
+}
+
+function extractSitemapLocs(xml) {
+  return Array.from(String(xml || "").matchAll(/<loc>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/loc>/gi))
+    .map((match) => decodeXmlText(match[1]).trim())
+    .filter(Boolean);
+}
+
+function serviceLandingVariants(pathname) {
+  let pathValue = String(pathname || "");
+
+  if (!pathValue.startsWith("/")) {
+    pathValue = `/${pathValue}`;
+  }
+
+  if (!/^\/services\/[^/]+\/?$/.test(pathValue)) {
+    return [];
+  }
+
+  const withoutTrailingSlash = pathValue.replace(/\/$/, "");
+  return [withoutTrailingSlash, `${withoutTrailingSlash}/`];
+}
+
+function collectionPagesFromSitemap(xml, server) {
+  const pages = new Map();
+
+  extractSitemapLocs(xml).forEach((loc) => {
+    let variants = [];
+
+    try {
+      const url = new URL(loc);
+
+      if (normalizeServerInput(url.hostname) !== normalizeServerInput(server)) {
+        return;
+      }
+
+      variants = serviceLandingVariants(url.pathname);
+    } catch (_error) {
+      variants = serviceLandingVariants(loc);
+    }
+
+    if (variants.length === 0) {
+      return;
+    }
+
+    const canonicalPath = variants[0];
+    pages.set(canonicalPath, {
+      path: canonicalPath,
+      variants
+    });
+  });
+
+  return Array.from(pages.values()).sort((left, right) => left.path.localeCompare(right.path));
+}
+
+async function fetchCollectionPaths(server) {
+  const normalizedServer = normalizeServerInput(server);
+  const sitemapUrl = new URL(`https://${normalizedServer}/sitemap.xml`);
+  const response = await fetch(sitemapUrl, {
+    method: "GET",
+    headers: {
+      Accept: "application/xml,text/xml;q=0.9,*/*;q=0.8"
+    }
+  });
+  const body = await response.text();
+
+  if (!response.ok) {
+    const error = new Error(`Sitemap request failed with status ${response.status}`);
+    error.status = response.status;
+    error.body = body;
+    error.sitemapUrl = sitemapUrl.toString();
+    throw error;
+  }
+
+  return {
+    sitemapUrl: sitemapUrl.toString(),
+    pages: collectionPagesFromSitemap(body, normalizedServer)
+  };
+}
+
 function buildQuery(template, form) {
   const replacements = {
     server: form.server.trim(),
@@ -417,6 +527,7 @@ function initialForm() {
   return {
     server: "status.broadcom.com",
     paths: "",
+    collection: false,
     from: range.from,
     until: range.until,
     displayUntil: range.displayUntil
@@ -435,10 +546,12 @@ function validateForm(form) {
 
 function buildRunForm(body) {
   const range = lastThirtyDayRange();
+  const collection = Boolean(body.collection);
 
   return {
-    server: body.server || "",
-    paths: body.paths || "",
+    server: normalizeServerInput(body.server),
+    paths: collection ? "" : body.paths || "",
+    collection,
     from: range.from,
     until: range.until,
     displayUntil: range.displayUntil
@@ -565,6 +678,169 @@ function writeJsonLine(res, payload) {
   res.write(`${JSON.stringify(payload)}\n`);
 }
 
+function collectionProgressPayload({ current, total, label }) {
+  return {
+    type: "collection-progress",
+    current,
+    total,
+    percent: total > 0 ? Math.round((current / total) * 100) : 0,
+    label
+  };
+}
+
+function collectionJsonFileName(server) {
+  const dateValue = new Date().toISOString().slice(0, 10);
+  return `${normalizeServerInput(server).replace(/[^a-z0-9.-]+/gi, "-")}-collection-${dateValue}.json`;
+}
+
+function formatPercentageValue(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return null;
+  }
+
+  return `${Number(value).toFixed(2)}%`;
+}
+
+function addCollectionPercentages(pathResults) {
+  const totalSuccessful = pathResults?.total?.total;
+
+  Object.values(pathResults || {}).forEach((bucketResult) => {
+    if (bucketResult && typeof bucketResult.total === "number") {
+      bucketResult.percentage = formatPercentageValue(percentageOfTotal(bucketResult.total, totalSuccessful));
+    }
+  });
+}
+
+async function runCollectionMode({ res, form, chunks }) {
+  writeJsonLine(res, collectionProgressPayload({
+    current: 0,
+    total: 1,
+    label: `Fetching https://${form.server}/sitemap.xml`
+  }));
+
+  const { sitemapUrl, pages: collectionPages } = await fetchCollectionPaths(form.server);
+
+  if (collectionPages.length === 0) {
+    writeJsonLine(res, {
+      type: "api-error",
+      result: {
+        name: "Collection sitemap",
+        query: sitemapUrl,
+        error: {
+          status: "No paths",
+          body: "No top-level /services/{service_name} paths were found in sitemap.xml."
+        }
+      }
+    });
+    return;
+  }
+
+  const totalSteps = collectionPages.length * buckets.length;
+  let completedSteps = 0;
+  const pages = {};
+
+  writeJsonLine(res, {
+    type: "collection-started",
+    pathCount: collectionPages.length,
+    bucketCount: buckets.length,
+    totalSteps,
+    sitemapUrl
+  });
+
+  for (const page of collectionPages) {
+    pages[page.path] = {};
+    let totalSuccessful;
+
+    for (const bucket of buckets) {
+      const label = `${page.path} - ${bucket.collectionKey}`;
+      writeJsonLine(res, collectionProgressPayload({
+        current: completedSteps,
+        total: totalSteps,
+        label
+      }));
+
+      try {
+        const bucketForm = {
+          ...form,
+          paths: page.variants.join("\n")
+        };
+        const { total } = await getBucketCountAcrossChunks({
+          workspaceId: FASTLY_WORKSPACE_ID,
+          token: FASTLY_API_KEY,
+          bucket,
+          form: bucketForm,
+          chunks
+        });
+
+        if (bucket.total) {
+          totalSuccessful = total;
+        }
+
+        pages[page.path][bucket.collectionKey] = {
+          total,
+          percentage: formatPercentageValue(percentageOfTotal(total, totalSuccessful))
+        };
+      } catch (error) {
+        pages[page.path][bucket.collectionKey] = {
+          error: {
+            status: error.status || "Unknown",
+            body: error.body || error.message
+          }
+        };
+      }
+
+      completedSteps += 1;
+      writeJsonLine(res, collectionProgressPayload({
+        current: completedSteps,
+        total: totalSteps,
+        label
+      }));
+
+      if (completedSteps < totalSteps && requestDelayMs > 0) {
+        await delay(requestDelayMs);
+      }
+    }
+
+    addCollectionPercentages(pages[page.path]);
+  }
+
+  const output = {
+    generatedAt: new Date().toISOString(),
+    server: form.server,
+    range: {
+      from: form.from,
+      through: form.displayUntil,
+      untilExclusive: form.until
+    },
+    pages
+  };
+  const id = crypto.randomUUID();
+
+  collectionResults.set(id, {
+    filename: collectionJsonFileName(form.server),
+    output
+  });
+
+  writeJsonLine(res, {
+    type: "collection-complete",
+    downloadUrl: `/collection-results/${id}`,
+    pathCount: collectionPages.length
+  });
+}
+
+app.get("/collection-results/:id", (req, res) => {
+  const result = collectionResults.get(req.params.id);
+
+  if (!result) {
+    res.status(404).send("Collection result not found");
+    return;
+  }
+
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+  res.send(JSON.stringify(result.output, null, 2));
+});
+
 app.post("/run", async (req, res) => {
   const form = buildRunForm(req.body);
   const errors = validateForm(form);
@@ -576,6 +852,28 @@ app.post("/run", async (req, res) => {
 
   if (errors.length > 0) {
     writeJsonLine(res, { type: "validation-error", errors });
+    res.end();
+    return;
+  }
+
+  if (form.collection) {
+    try {
+      await runCollectionMode({ res, form, chunks });
+    } catch (error) {
+      writeJsonLine(res, {
+        type: "api-error",
+        result: {
+          name: "Collection run",
+          query: error.sitemapUrl || `https://${form.server}/sitemap.xml`,
+          error: {
+            status: error.status || "Unknown",
+            body: error.body || error.message
+          }
+        }
+      });
+    }
+
+    writeJsonLine(res, { type: "done" });
     res.end();
     return;
   }
@@ -684,9 +982,11 @@ if (require.main === module) {
 
 module.exports = {
   app,
+  addCollectionPercentages,
   buildDateChunks,
   buildPathFilter,
   buildQuery,
+  collectionPagesFromSitemap,
   lastThirtyDayRange,
   getFastlyCount,
   normalizeDateForFastly

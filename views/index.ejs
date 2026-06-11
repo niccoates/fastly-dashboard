@@ -68,7 +68,19 @@
       <section class="mb-8 rounded border border-slate-200 bg-white p-5 shadow-sm">
         <form id="query-form" method="post" class="grid gap-5">
           <div>
-            <label for="server" class="block text-sm font-medium text-slate-700">Server hostname</label>
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <label for="server" class="block text-sm font-medium text-slate-700">Server hostname</label>
+              <label class="inline-flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  id="collection"
+                  name="collection"
+                  type="checkbox"
+                  value="1"
+                  <%= form.collection ? "checked" : "" %>
+                  class="h-4 w-4 rounded border-slate-300 text-red-600 focus:ring-red-200">
+                Collection
+              </label>
+            </div>
             <input
               id="server"
               name="server"
@@ -78,7 +90,7 @@
               class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-100">
           </div>
 
-          <div>
+          <div id="paths-field">
             <label for="paths" class="block text-sm font-medium text-slate-700">Paths</label>
             <textarea
               id="paths"
@@ -109,6 +121,25 @@
       <section id="validation-errors" class="mb-5 hidden rounded border border-red-200 bg-red-50 p-4 text-sm text-red-800">
         <p class="font-medium">Please fix the following:</p>
         <ul id="validation-errors-list" class="mt-2 list-disc pl-5"></ul>
+      </section>
+
+      <section id="collection-section" class="mb-8 hidden">
+        <div class="rounded border border-slate-200 bg-white p-5 shadow-sm">
+          <div class="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <h2 class="text-lg font-semibold">Collection progress</h2>
+            <span id="collection-counts" class="text-xs text-slate-500">Ready</span>
+          </div>
+          <div class="h-3 overflow-hidden rounded bg-slate-100">
+            <div id="collection-progress-bar" class="h-full w-0 bg-red-600 transition-all" aria-hidden="true"></div>
+          </div>
+          <p id="collection-progress-label" class="mt-3 text-sm text-slate-600">Waiting to start...</p>
+          <a
+            id="collection-download"
+            href="#"
+            class="mt-4 hidden inline-flex items-center rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-slate-800">
+            Download JSON
+          </a>
+        </div>
       </section>
 
       <section id="results-section" class="<%= submitted && results.length > 0 ? "" : "hidden" %>">
@@ -177,13 +208,27 @@
 
       <script>
         const form = document.getElementById("query-form");
+        const collectionToggle = document.getElementById("collection");
+        const pathsField = document.getElementById("paths-field");
         const runButton = document.getElementById("run-button");
         const resultsSection = document.getElementById("results-section");
         const resultsBody = document.getElementById("results-body");
         const runStatus = document.getElementById("run-status");
         const validationErrors = document.getElementById("validation-errors");
         const validationErrorsList = document.getElementById("validation-errors-list");
+        const collectionSection = document.getElementById("collection-section");
+        const collectionProgressBar = document.getElementById("collection-progress-bar");
+        const collectionProgressLabel = document.getElementById("collection-progress-label");
+        const collectionCounts = document.getElementById("collection-counts");
+        const collectionDownload = document.getElementById("collection-download");
         const pendingRows = new Map();
+
+        function syncCollectionMode() {
+          pathsField.classList.toggle("hidden", collectionToggle.checked);
+        }
+
+        collectionToggle.addEventListener("change", syncCollectionMode);
+        syncCollectionMode();
 
         function escapeHtml(value) {
           return String(value)
@@ -286,7 +331,30 @@
           validationErrors.classList.remove("hidden");
         }
 
-        async function readResultStream(response) {
+        function resetCollectionProgress() {
+          collectionProgressBar.style.width = "0%";
+          collectionProgressLabel.textContent = "Fetching sitemap...";
+          collectionCounts.textContent = "Starting";
+          collectionDownload.classList.add("hidden");
+          collectionDownload.removeAttribute("href");
+        }
+
+        function updateCollectionProgress(message) {
+          collectionProgressBar.style.width = `${message.percent || 0}%`;
+          collectionProgressLabel.textContent = message.label || "Running collection...";
+          collectionCounts.textContent = `${message.current || 0} / ${message.total || 0}`;
+        }
+
+        function finishCollection(message) {
+          collectionProgressBar.style.width = "100%";
+          collectionProgressLabel.textContent = `Complete. ${message.pathCount} paths queried.`;
+          collectionCounts.textContent = "Complete";
+          collectionDownload.href = message.downloadUrl;
+          collectionDownload.classList.remove("hidden");
+        }
+
+        async function readResultStream(response, options = {}) {
+          const collectionMode = Boolean(options.collectionMode);
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
@@ -316,12 +384,34 @@
                 appendStartedRow(message);
               }
 
+              if (message.type === "collection-started") {
+                collectionCounts.textContent = `0 / ${message.totalSteps}`;
+                collectionProgressLabel.textContent = `Found ${message.pathCount} service paths in sitemap`;
+              }
+
+              if (message.type === "collection-progress") {
+                updateCollectionProgress(message);
+              }
+
+              if (message.type === "collection-complete") {
+                finishCollection(message);
+              }
+
               if (message.type === "result" || message.type === "api-error") {
-                finishRow(message.result);
+                if (collectionMode) {
+                  if (message.type === "api-error") {
+                    collectionProgressLabel.textContent = `${message.result.name}: ${message.result.error.body}`;
+                    collectionCounts.textContent = "Error";
+                  }
+                } else {
+                  finishRow(message.result);
+                }
               }
 
               if (message.type === "done") {
-                runStatus.textContent = "Complete";
+                if (!collectionMode) {
+                  runStatus.textContent = "Complete";
+                }
               }
             }
           }
@@ -331,18 +421,26 @@
           event.preventDefault();
 
           const originalButtonText = runButton.textContent;
+          const collectionMode = collectionToggle.checked;
           validationErrors.classList.add("hidden");
           validationErrorsList.innerHTML = "";
-          resultsSection.classList.remove("hidden");
-          resultsBody.innerHTML = `
-            <tr id="initial-loading-row">
-              <td colspan="4" class="px-4 py-6 text-center text-sm text-slate-500">
-                Starting request run...
-              </td>
-            </tr>
-          `;
+          if (collectionMode) {
+            resultsSection.classList.add("hidden");
+            collectionSection.classList.remove("hidden");
+            resetCollectionProgress();
+          } else {
+            collectionSection.classList.add("hidden");
+            resultsSection.classList.remove("hidden");
+            resultsBody.innerHTML = `
+              <tr id="initial-loading-row">
+                <td colspan="4" class="px-4 py-6 text-center text-sm text-slate-500">
+                  Starting request run...
+                </td>
+              </tr>
+            `;
+          }
           pendingRows.clear();
-          runStatus.textContent = "Starting request run";
+          runStatus.textContent = collectionMode ? "Collection mode" : "Starting request run";
           runButton.textContent = "Running...";
           runButton.disabled = true;
           runButton.classList.add("cursor-not-allowed", "opacity-70");
@@ -356,17 +454,22 @@
               body: JSON.stringify(Object.fromEntries(new FormData(form)))
             });
 
-            await readResultStream(response);
+            await readResultStream(response, { collectionMode });
           } catch (error) {
-            runStatus.textContent = "Request failed";
-            resultsBody.insertAdjacentHTML("beforeend", rowHtml({
-              name: "Dashboard request",
-              query: "POST /run",
-              error: {
-                status: "Client error",
-                body: error.message
-              }
-            }, "done"));
+            if (collectionMode) {
+              collectionCounts.textContent = "Error";
+              collectionProgressLabel.textContent = error.message;
+            } else {
+              runStatus.textContent = "Request failed";
+              resultsBody.insertAdjacentHTML("beforeend", rowHtml({
+                name: "Dashboard request",
+                query: "POST /run",
+                error: {
+                  status: "Client error",
+                  body: error.message
+                }
+              }, "done"));
+            }
           } finally {
             runButton.disabled = false;
             runButton.textContent = originalButtonText;
