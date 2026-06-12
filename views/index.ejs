@@ -353,6 +353,31 @@
           collectionDownload.classList.remove("hidden");
         }
 
+        function startRunKeepalive() {
+          let stopped = false;
+
+          async function ping() {
+            if (stopped) return;
+
+            try {
+              await fetch(`/keepalive?ts=${Date.now()}`, {
+                cache: "no-store",
+                keepalive: true
+              });
+            } catch (_error) {
+              // Keepalive failures should never interrupt the active report run.
+            }
+          }
+
+          ping();
+          const intervalId = window.setInterval(ping, 60 * 1000);
+
+          return () => {
+            stopped = true;
+            window.clearInterval(intervalId);
+          };
+        }
+
         async function readResultStream(response, options = {}) {
           const collectionMode = Boolean(options.collectionMode);
           const reader = response.body.getReader();
@@ -445,6 +470,8 @@
           runButton.disabled = true;
           runButton.classList.add("cursor-not-allowed", "opacity-70");
 
+          const stopKeepalive = startRunKeepalive();
+
           try {
             const response = await fetch("/run", {
               method: "POST",
@@ -471,6 +498,7 @@
               }, "done"));
             }
           } finally {
+            stopKeepalive();
             runButton.disabled = false;
             runButton.textContent = originalButtonText;
             runButton.classList.remove("cursor-not-allowed", "opacity-70");

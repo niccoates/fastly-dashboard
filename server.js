@@ -579,6 +579,11 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/keepalive", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.status(204).end();
+});
+
 app.post("/", async (req, res) => {
   const form = buildRunForm(req.body);
   const errors = validateForm(form);
