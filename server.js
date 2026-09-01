@@ -21,6 +21,7 @@ const authToken = INTERNAL_PASSWORD
 const maxSelectedRangeDays = 30;
 const maxFastlyChunkDays = 7;
 const collectionResults = new Map();
+const collectionSitemapPath = "/sitemaps/pages.xml";
 
 const buckets = [
   {
@@ -400,7 +401,7 @@ function collectionPagesFromSitemap(xml, server) {
 
 async function fetchCollectionPaths(server) {
   const normalizedServer = normalizeServerInput(server);
-  const sitemapUrl = new URL(`https://${normalizedServer}/sitemap.xml`);
+  const sitemapUrl = new URL(`https://${normalizedServer}${collectionSitemapPath}`);
   const response = await fetch(sitemapUrl, {
     method: "GET",
     headers: {
@@ -733,7 +734,7 @@ async function runCollectionMode({ res, form, chunks }) {
   writeJsonLine(res, collectionProgressPayload({
     current: 0,
     total: 1,
-    label: `Fetching https://${form.server}/sitemap.xml`
+    label: `Fetching https://${form.server}${collectionSitemapPath}`
   }));
 
   const { sitemapUrl, pages: collectionPages } = await fetchCollectionPaths(form.server);
@@ -746,7 +747,7 @@ async function runCollectionMode({ res, form, chunks }) {
         query: sitemapUrl,
         error: {
           status: "No paths",
-          body: "No top-level /services/{service_name} paths were found in sitemap.xml."
+          body: `No top-level /services/{service_name} paths were found in ${collectionSitemapPath}.`
         }
       }
     });
@@ -882,7 +883,7 @@ app.post("/run", async (req, res) => {
         type: "api-error",
         result: {
           name: "Collection run",
-          query: error.sitemapUrl || `https://${form.server}/sitemap.xml`,
+          query: error.sitemapUrl || `https://${form.server}${collectionSitemapPath}`,
           error: {
             status: error.status || "Unknown",
             body: error.body || error.message
